@@ -1,0 +1,209 @@
+---
+- hosts: all
+  become: yes
+  connection: local
+  tasks:
+    - name: Update apt and install base packages (LXD, Ansible dependencies)
+      apt:
+        update_cache: yes
+        name:
+          - lxd
+          - lxd-client
+          - nfs-kernel-server
+        state: present
+
+    - name: Add vagrant user to lxd group (to use LXD without sudo)
+      user:
+        name: vagrant
+        groups: lxd
+        append: yes
+
+    - name: Initialize LXD with default settings
+      shell: lxd init --auto
+
+    - name: Wait for lxdbr0 to be available
+      shell: |
+        for i in {1..10}; do
+          if lxc network list | grep -q lxdbr0; then exit 0; fi
+          sleep 2
+        done
+        exit 1
+      args:
+        warn: false
+
+    - name: Configure LXD bridge network with specific subnet
+      shell: |
+        lxc network set lxdbr0 ipv4.address 10.10.10.1/24
+        lxc network set lxdbr0 ipv4.nat true
+      args:
+        warn: false
+
+    - name: Ensure LXD images remote is added
+      shell: |
+        if ! lxc remote list | grep -q '^images'; then
+          lxc remote add images https://images.linuxcontainers.org --accept-certificate
+        else
+          echo "images remote already exists."
+        fi
+        exit 0
+      args:
+        warn: false
+
+    - name: Create LXD profiles for Kubernetes master and worker nodes
+      shell: |
+        lxc profile show k8smaster || lxc profile copy default k8smaster
+        lxc profile show k8sworker || lxc profile copy default k8sworker
+
+    - name: Create master profile configuration file
+      copy:
+        dest: /tmp/k8smaster-profile.yaml
+        content: |
+          config:
+            limits.cpu: "2"
+            limits.memory: 2GB
+            limits.memory.swap: "false"
+            security.nesting: "true"
+            security.privileged: "true"
+            linux.kernel_modules: ip_tables,ip6_tables,netlink_diag,nf_nat,overlay
+            raw.lxc: |
+              lxc.apparmor.profile=unconfined
+              lxc.cap.drop=
+              lxc.mount.auto=proc:rw sys:rw cgroup:rw
+          devices:
+            root:
+              path: /
+              pool: default
+              type: disk
+            eth0:
+              name: eth0
+              network: lxdbr0
+              type: nic
+
+    - name: Apply master profile configuration
+      shell: "lxc profile edit k8smaster < /tmp/k8smaster-profile.yaml"
+
+    - name: Create worker profile configuration file
+      copy:
+        dest: /tmp/k8sworker-profile.yaml
+        content: |
+          config:
+            limits.cpu: "1"
+            limits.memory: 2GB
+            limits.memory.swap: "false"
+            security.nesting: "true"
+            security.privileged: "true"
+            linux.kernel_modules: ip_tables,ip6_tables,netlink_diag,nf_nat,overlay
+            raw.lxc: |
+              lxc.apparmor.profile=unconfined
+              lxc.cap.drop=
+              lxc.mount.auto=proc:rw sys:rw cgroup:rw
+          devices:
+            root:
+              path: /
+              pool: default
+              type: disk
+            eth0:
+              name: eth0
+              network: lxdbr0
+              type: nic
+
+    - name: Apply worker profile configuration
+      shell: "lxc profile edit k8sworker < /tmp/k8sworker-profile.yaml"
+
+    - name: Remove existing kmaster container if it exists
+      shell: |
+        if lxc info kmaster >/dev/null 2>&1; then
+          lxc delete kmaster --force
+        fi
+      ignore_errors: yes
+
+    - name: Launch Kubernetes master container (kmaster)
+      shell: |
+        lxc launch ubuntu:20.04 kmaster --profile k8smaster -c user.user-data=""
+        lxc stop kmaster && lxc config device override kmaster eth0 ipv4.address=10.10.10.101 && lxc start kmaster
+      register: kmaster_result
+
+    - name: Remove existing kworker1 container if it exists
+      shell: |
+        if lxc info kworker1 >/dev/null 2>&1; then
+          lxc delete kworker1 --force
+        fi
+      ignore_errors: yes
+
+    - name: Launch Kubernetes worker1 container (kworker1)
+      shell: |
+        lxc launch ubuntu:20.04 kworker1 --profile k8sworker -c user.user-data=""
+        lxc stop kworker1 && lxc config device override kworker1 eth0 ipv4.address=10.10.10.102 && lxc start kworker1
+
+    - name: Remove existing kworker2 container if it exists
+      shell: |
+        if lxc info kworker2 >/dev/null 2>&1; then
+          lxc delete kworker2 --force
+        fi
+      ignore_errors: yes
+
+    - name: Launch Kubernetes worker2 container (kworker2)
+      shell: |
+        lxc launch ubuntu:20.04 kworker2 --profile k8sworker -c user.user-data=""
+        lxc stop kworker2 && lxc config device override kworker2 eth0 ipv4.address=10.10.10.103 && lxc start kworker2
+
+    - name: Wait for containers to obtain IP addresses
+      shell: |
+        for name in kmaster kworker1 kworker2; do
+          echo "Waiting for $name network..."
+          until lxc list "$name" -c4 | grep -q 10.10.10; do sleep 2; done
+        done
+
+    - name: Set up NFS export directory on host
+      file:
+        path: /pvs
+        state: directory
+        mode: "0777"
+
+    - name: Configure NFS export for /pvs
+      copy:
+        dest: /etc/exports
+        content: "/pvs 10.10.10.0/24(rw,sync,no_subtree_check,no_root_squash)\n"
+      notify: [ Restart NFS ]
+
+    - name: Install NFS client utilities in containers (for mounting)
+      shell: |
+        lxc exec kmaster -- apt-get update && lxc exec kmaster -- apt-get install -y nfs-common
+        lxc exec kworker1 -- apt-get update && lxc exec kworker1 -- apt-get install -y nfs-common
+        lxc exec kworker2 -- apt-get update && lxc exec kworker2 -- apt-get install -y nfs-common
+
+    - name: Mount NFS share in containers
+      shell: |
+        for name in kmaster kworker1 kworker2; do 
+          lxc exec $name -- mkdir -p /pvs
+          lxc exec $name -- mount -t nfs -o vers=4 10.10.10.1:/pvs /pvs
+          lxc exec $name -- sh -c 'echo "10.10.10.1:/pvs /pvs nfs defaults 0 0" >> /etc/fstab'
+        done
+
+    - name: Copy Kubernetes bootstrap script into containers
+      copy:
+        src: bootstrap_k8s.sh
+        dest: /home/vagrant/bootstrap_k8s.sh
+        mode: "0755"
+      delegate_to: localhost
+
+    - name: Push script into LXC containers
+      shell: |
+        for name in kmaster kworker1 kworker2; do
+          lxc file push /home/vagrant/bootstrap_k8s.sh $name/root/bootstrap_k8s.sh
+        done
+
+    - name: Run Kubernetes setup on master node
+      shell: lxc exec kmaster -- bash /root/bootstrap_k8s.sh
+
+    - name: Run Kubernetes setup on worker1 node
+      shell: lxc exec kworker1 -- bash /root/bootstrap_k8s.sh
+
+    - name: Run Kubernetes setup on worker2 node
+      shell: lxc exec kworker2 -- bash /root/bootstrap_k8s.sh
+
+  handlers:
+    - name: Restart NFS
+      service:
+        name: nfs-kernel-server
+        state: restarted
