@@ -163,8 +163,11 @@
     - name: Configure NFS export for /pvs
       copy:
         dest: /etc/exports
-        content: "/pvs 10.10.10.0/24(rw,sync,no_subtree_check,no_root_squash)\n"
+        content: "/pvs 10.10.10.0/24(rw,sync,no_subtree_check,no_root_squash,insecure)\n"
       notify: [ Restart NFS ]
+
+    - name: Flush handlers to restart NFS immediately
+      meta: flush_handlers
 
     - name: Install NFS client utilities in containers (for mounting)
       shell: |
