@@ -43,16 +43,24 @@ NODE_NAME=$(hostname)
 if [[ "$NODE_NAME" == "kmaster" ]]; then
   echo "[+] Initializing Kubernetes master node"
   # Initialize Kubernetes control-plane
-  kubeadm init --apiserver-advertise-address=10.10.10.101 --pod-network-cidr=10.244.0.0/16 
+  # Ignore SystemVerification preflight check - This is standard practice for containerized K8s environments
+  # as they share the host kernel and don't need direct kernel config access. The necessary modules
+  # (overlay, br_netfilter, etc.) are already loaded on the host VM.
+  kubeadm init --apiserver-advertise-address=10.10.10.101 --pod-network-cidr=10.244.0.0/16 --ignore-preflight-errors=SystemVerification
   # Set up kubeconfig for convenience
   mkdir -p $HOME/.kube
   cp -f /etc/kubernetes/admin.conf $HOME/.kube/config
 
   # Install a CNI plugin (Flannel for networking)
   kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
-
+  
+  kubectl -n kube-system get configmap kube-proxy -o yaml | sed -e "s/maxPerCore: .*$/maxPerCore: 0/" | kubectl apply -f -
   # Generate join command script for workers
-  kubeadm token create --print-join-command > /pvs/joincluster.sh
+  # We need to add the --ignore-preflight-errors=SystemVerification flag to the join command
+  # to allow workers to join the cluster without the kernel verification check.
+  kubeadm token create --print-join-command > /pvs/joincmd.tmp
+  echo "$(cat /pvs/joincmd.tmp) --ignore-preflight-errors=SystemVerification" > /pvs/joincluster.sh
+  chmod +x /pvs/joincluster.sh
   echo "[+] Master initialized. Join command saved to /pvs/joincluster.sh"
   
   # Install Helm (v3) on master

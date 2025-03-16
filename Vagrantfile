@@ -3,7 +3,7 @@ Vagrant.configure("2") do |config|
     config.vm.box = "ubuntu/focal64"  # Ubuntu 20.04 LTS base image (lightweight server)
     config.vm.hostname = "k8s-lxc-host"
     config.vm.provider "virtualbox" do |vb|
-      vb.name = "k8s-lxc-cluster-vm"
+      vb.name = "k8s-lxc-cluster-vm"  # Name of VM in VirtualBox
       vb.memory = 6144        # 6 GB RAM for VM (adjust as needed)
       vb.cpus = 4             # 4 CPU cores for VM
     end

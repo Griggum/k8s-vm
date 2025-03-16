@@ -18,6 +18,15 @@
         groups: lxd
         append: yes
 
+    - name: Prepare Kernel Modules and Conntrack Max in VM for LXD
+      shell: |
+          modprobe overlay
+          modprobe br_netfilter
+          modprobe nf_nat
+          modprobe nf_conntrack
+          sysctl -w net.netfilter.nf_conntrack_max=524288
+
+
     - name: Initialize LXD with default settings
       shell: lxd init --auto
 
@@ -64,12 +73,19 @@
             limits.memory.swap: "false"
             security.nesting: "true"
             security.privileged: "true"
-            linux.kernel_modules: ip_tables,ip6_tables,netlink_diag,nf_nat,overlay
+            security.syscalls.intercept.mknod: "true"
+            security.syscalls.intercept.setxattr: "true"
+            linux.kernel_modules: ip_tables,ip6_tables,nf_nat,overlay,br_netfilter,nf_conntrack
             raw.lxc: |
               lxc.apparmor.profile=unconfined
-              lxc.cap.drop=
-              lxc.mount.auto=proc:rw sys:rw cgroup:rw
+              lxc.cap.drop= 
+              lxc.cgroup.devices.allow=a
+              lxc.mount.auto=proc:rw sys:rw
           devices:
+            kmsg:
+              path: /dev/kmsg
+              source: /dev/kmsg
+              type: unix-char
             root:
               path: /
               pool: default
@@ -92,12 +108,19 @@
             limits.memory.swap: "false"
             security.nesting: "true"
             security.privileged: "true"
-            linux.kernel_modules: ip_tables,ip6_tables,netlink_diag,nf_nat,overlay
+            security.syscalls.intercept.mknod: "true"
+            security.syscalls.intercept.setxattr: "true"
+            linux.kernel_modules: ip_tables,ip6_tables,nf_nat,overlay,br_netfilter,nf_conntrack
             raw.lxc: |
               lxc.apparmor.profile=unconfined
-              lxc.cap.drop=
-              lxc.mount.auto=proc:rw sys:rw cgroup:rw
+              lxc.cap.drop= 
+              lxc.cgroup.devices.allow=a
+              lxc.mount.auto=proc:rw sys:rw
           devices:
+            kmsg:
+              path: /dev/kmsg
+              source: /dev/kmsg
+              type: unix-char
             root:
               path: /
               pool: default
